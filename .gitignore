@@ -1,0 +1,15 @@
+# 运行时数据（扫描库、日志、隔离区清单）——含本机路径，不入库
+data/
+quarantine/
+selftest.txt
+
+# 构建产物与打包依赖
+build/
+dist/
+pylibs/
+wheels/
+*.spec
+
+# Python 缓存
+__pycache__/
+*.pyc

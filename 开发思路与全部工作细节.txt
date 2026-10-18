@@ -1,0 +1,374 @@
+磁盘分析工具 disk-inspector —— 开发思路与全部工作细节
+
+日期：2026-10-18（凌晨，本地时间）
+需求提出：康顺杰
+实现：DeepSeek Harness agent
+工程目录：C:\Users\ksl\Documents\deepseek-harness\default-workspace\disk-inspector\
+成品：桌面「磁盘分析」文件夹（磁盘分析.exe，双击即用）
+
+
+======================================================================
+一、需求（原话）
+======================================================================
+
+你的原话：
+「我想要做一个专门检测某一个硬盘中各种文件占比的软件，尤其是展现各种隐藏文件，
+因为我每次下一些软件后再删除时，它总会留下一些垃圾文件，但混杂在一些重要文件中
+我又不敢随便删，现在你提供一些思路，尽可能详细」
+
+拆解成 4 个核心能力：
+1. 占比：某个硬盘/目录里，各类文件各占多少空间（按文件夹、按类型、按软件、按时间）
+2. 隐藏文件：Windows 有好几种隐藏方式，普通工具只看得到第一种，要全部挖出来
+3. 残留识别：装过又卸载的软件留下的目录，和还在用的软件目录区分开
+4. 安全：因为「混杂重要文件不敢删」，软件只给证据、只标「疑似」，删除永远人工确认
+
+
+======================================================================
+二、总体设计思路
+======================================================================
+
+2.1 数据模型：扫描一次，存 SQLite
+  全盘扫描把每个文件的「大小 + 创建/修改/访问时间 + 隐藏/系统/只读属性 + 扩展名」
+  记进数据库（files 表），目录记进 dirs 表，读不了的目录记进 errors 表，
+  扫描参数记进 meta 表。之后所有视图（占比/隐藏/残留/大文件/很久没动）
+  都从这份数据库算，不用反复全盘扫。
+
+2.2 占比怎么算
+  - 文件大小按「逻辑大小」累加；从叶子目录往上聚合到根，得到每个目录含子目录的总大小
+  - 误差说明：逻辑大小 ≠ 磁盘簇占用（几百个小文件会偏小），界面里注明
+  - 树状图（treemap）：把目录按大小切成色块，面积=大小，点击可下钻
+  - 四种口径：按文件夹 / 按文件类型 / 按软件归属 / 按时间（一年没动过）
+
+2.3 隐藏文件的五种形态（全部要覆盖）
+  1) H 属性的文件/文件夹：资源管理器勾「隐藏的项目」才可见
+  2) S 系统属性的：System Volume Information、$Recycle.Bin 这类，普通用户打不开
+  3) 惯例藏起来的目录：AppData、ProgramData、%TEMP%、C:\Windows\Installer、
+     ProgramData\Package Cache、.git、__pycache__ 等
+  4) NTFS 备用数据流（ADS）：文件可以挂「影子数据」，资源管理器显示的大小看不到它，
+     dir /r 才看得到（下载文件自带的 Zone.Identifier 就是这种）
+  5) 系统还原点/卷影副本：藏在 System Volume Information，要提权才能看
+
+2.4 文件归属（「这堆是哪个软件的」）
+  判定来源，按可靠性排序：
+  1) 系统卸载列表：注册表
+     HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall
+     HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall
+     HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall
+     里的 DisplayName（软件名）+ InstallLocation（装在哪）
+  2) 目录惯例：AppData\Local\<厂商>\<软件名>、AppData\Roaming\...、ProgramData\...
+  3) 匹配规则：目录名与卸载记录做归一化比对（小写、去符号、去尾部版本号），
+     匹配上 = 「正在使用」；匹配不上 = 「疑似已卸载残留」
+  4) 边界诚实：便携软件/绿色软件不进卸载列表，会被误标为疑似 —— 所以只标「疑似」
+
+2.5 安全设计五原则
+  1) 扫描与所有视图 100% 只读，程序本身不做任何删除
+  2) 每个文件/目录都能看到：大小、时间、属于哪个软件、该软件是否还在
+  3) 两级删除：第一步「移入隔离区」（同盘移动=改地址，瞬间完成、随时还原）；
+     放 30 天没问题，第二步再手动真删
+  4) 白名单默认不碰：C:\Windows、还在使用的软件目录、System Volume Information
+  5) 有些目录普通权限读不了，留「提权重扫」入口（你自己点 UAC「是」）
+
+
+======================================================================
+三、技术路线选择
+======================================================================
+
+你的机器现状（2026-10-16 观测）：Windows 10 Enterprise 22H2、Python 3.14.7 已装、
+只有 Windows PowerShell 5.1、没有系统级 node/npm、Visual Studio Community 2026 已装。
+
+候选与结论：
+- Python + Tkinter（选它）：你机器已有 Python，图形库随 Python 自带，零额外安装；
+  我直接写好给你跑，最后能打包成 exe 放桌面
+- PowerShell 脚本（备选）：零安装最简单，但全盘扫描慢、界面简陋
+- C# WinForms（备选）：性能最好，但对你来说以后改代码门槛最高
+- 顺带说明：只为了「看占比」的话，免费工具 WizTree 已做得极好（直读 NTFS 的 MFT，
+  几秒出全盘结果，能显示隐藏文件）。这个软件的独特价值是「隐藏文件专项 +
+  残留识别 + 隔离区」三样，以及数据完全留在本机
+
+版本计划（全部完成）：
+- v0.1 命令行扫描器（扫描 + 数据库 + 中文报告）
+- v0.2 占比视图 + 隐藏文件专项 + ADS 检测
+- v0.3 疑似残留识别（卸载列表比对）
+- v0.4 图形界面（五标签页 + treemap + 隔离区）
+- v0.5 打包 exe 放桌面
+
+
+======================================================================
+四、开发过程（每版做了什么、怎么验证的）
+======================================================================
+
+v0.1 扫描器（scan.py）
+- 功能：递归遍历根目录（支持 C:\ D:\ 任意目录），记录文件元数据到 SQLite，
+  同时生成中文汇总报告（总览/一级目录占比/最大 20 个文件夹/按扩展名/无法访问清单）
+- 技术细节：ctypes 调 GetFileAttributesW 读 H/S/R 属性；符号链接与 junction 不跟随
+  （避免 AppData 别名目录重复计数）；用 \\?\ 前缀支持超长路径；每 5000 行提交一次
+  并打印进度；只读，不删除任何东西
+- 性能实测：C:\Users\ksl\.dsh（29,547 文件）4 秒；全盘 C+D（424,983 文件 / 114,051
+  目录 / 265.1 GB）45 秒
+- 验证：写 verify-scan.py 用独立 os.walk 重走一遍逐字节比对（计数/大小/路径全集），
+  写 verify-sample.py 随机抽 15 个目录重走比对（文件数/总大小/隐藏文件数）
+
+v0.2 视图（views.py + analyze.py）
+- tree：目录占比树，带比例条（# 号），可按路径下钻看直接子目录
+- hidden：隐藏文件专项报告：总数/总大小、最大隐藏目录、最大隐藏文件、
+  按扩展名、按区域（Windows 系统目录/Program Files/ProgramData/用户目录/D 盘）
+- ads：NTFS 备用数据流检测。用 ctypes 调 FindFirstStreamW / FindNextStreamW
+  枚举每个文件的流，列出非默认流（如 :Zone.Identifier）及大小
+- 测试夹具：造了「隐藏文件 + 隐藏目录 + 带 ADS 文件」的 _fixture 目录，
+  扫描后 hidden 正确报出 1 个隐藏文件 + 1 个隐藏目录，ads 正确报出 :junk 21 字节
+
+v0.3 疑似残留（residual.py）
+- 读三处注册表卸载列表（63 条），列出 AppData\Local / AppData\Roaming / ProgramData /
+  Program Files* / D 盘根下的候选目录，按「厂商\应用」两级比对
+- 归一化匹配：小写、去非字母数字中文、去尾部版本号；InstallLocation 与 DisplayName
+  双向包含即算匹配
+- 白名单：Microsoft/Windows/Packages/Temp/pip/npm/pnpm/缓存类等不参与比对
+- 结果：候选 7,565 个，匹配 5,616 个，疑似残留 1,687 个（详见第五节）
+
+v0.4 图形界面（gui.py + quarantine.py）
+- 五个标签页：
+  占比：Canvas 画的 treemap（切片算法），红=隐藏目录、橙=疑似残留，
+       点击下钻、右键返回上一级
+  隐藏文件：表格，可按区域筛选，显示类型/路径/大小/修改时间
+  疑似残留：表格（路径/大小/区域/厂商/应用），顶部显示口径与统计
+  大文件：按大小排序前 500
+  很久没动：按修改时间筛选（1/2/3 年以上），前 500
+- 任何列表右键：打开所在文件夹 / 复制路径 / 移入隔离区（需确认）
+- 隔离区（quarantine.py）：同盘移动用 shutil.move（=改名，瞬间完成）；
+  跨盘会复制（慢，会提示）；清单文件 manifest.json 记录原路径，可随时还原
+- 自检模式：gui.py --selftest 不开窗口，跑完所有查询打印结果（用于验证）
+- 打包后自检：{totals_dirs: 114051, rects: 34, hidden_rows: 524,
+  residual_rows: 1000, big_rows: 500, old_rows: 500}
+
+v0.5 打包（到桌面）
+- 沙箱里 pip 装 PyInstaller 失败（无网络 + 写 AppData 被拒），解决路线：
+  1) 用 DSH 自带 node（v24.21.0）写脚本从 PyPI 拉 wheel：
+     pyinstaller 6.22.3 / hooks-contrib 2026.8 / altgraph / pefile /
+     packaging / pywin32-ctypes / setuptools
+  2) 手动把 wheel 解压到工程内 pylibs/（不经过 pip）
+  3) PYTHONPATH=pylibs python -m PyInstaller --onedir 打包
+- 为什么不用 --onefile（单文件版）：单文件版启动时要解压到 %TEMP%，
+  而本机 Temp 目录有权限问题（见第六节坑 3），单文件版必崩
+- 最终：onedir 文件夹版，桌面「磁盘分析」文件夹（exe + _internal）
+- exe 自检：打包版能正常启动并跑完 --selftest，五视图全部出数
+
+
+======================================================================
+五、实际扫描结果（你的机器，2026-10-18 快照）
+======================================================================
+
+总量：424,983 个文件 / 114,051 个目录 / 265.1 GB（逻辑大小）/ 45 秒
+无法访问：760 处（普通权限进不去，见下）
+未跟踪链接：2 个
+
+C 盘一级目录（合计 191.6 GB，占 C 盘已用约 96%）：
+  C:\vm                              97.7 GB   51.0%   ← 虚拟机文件，最大头
+  C:\Users                           28.9 GB   15.1%
+  C:\Windows                         25.5 GB   13.3%
+  C:\SWSetup                          6.6 GB    3.4%   ← HP 装机驱动缓存，典型可清
+  C:\Program Files (x86)              6.0 GB    3.1%
+  C:\Program Files                    5.4 GB    2.8%
+  C:\ProgramData                      2.1 GB    1.1%
+  C:\deepseek harness                 1.0 GB    0.5%
+  C:\deepseek harness.new-{A2DE153C-…} 1.0 GB  0.5%   ← DSH 更新残骸？
+  C:\Cursor                         961.7 MB    0.5%
+  C:\微信本体                       881.5 MB    0.4%
+  C:\SakuraCat                      414.9 MB    0.2%
+  C:\grox bot                       394.7 MB    0.2%
+  C:\微信聊天储存                   224.9 MB    0.1%
+  C:\$SysReset                      208.1 MB    0.1%
+
+D 盘一级目录（合计 73.5 GB）：
+  D:\江西理工大学文件                53.1 GB   72.2%   ← 你的学校资料，重要
+  D:\vm                             16.4 GB   22.3%
+  D:\旧系统应用                      2.8 GB    3.8%
+  D:\claude ccswitch转接            445.2 MB    0.6%
+  D:\XP                             400.7 MB    0.5%
+  D:\Obsidian                       387.6 MB    0.5%
+  D:\江西理工大学旧数据               57.6 MB    0.1%
+  D:\evolution.1                      7.5 MB    …
+
+隐藏文件：
+  文件 302 个，合计 14.2 GB
+  最大的：
+    C:\pagefile.sys        12.0 GB   ← 页面文件，系统文件，不能删
+    C:\hiberfil.sys         3.2 GB   ← 休眠文件，系统文件，不能删
+    C:\swapfile.sys        16.0 MB   ← 系统文件，不能删
+    其余是 NTUSER.DAT 注册表文件、WebCache、.git 目录等
+  隐藏目录 220 个，最大的：AppData 18.1 GB、ProgramData 2.1 GB、
+    immersive-translate\.git 812.2 MB、Windows\Installer 329.4 MB、$SysReset 208.1 MB
+
+疑似残留（前几名，均为「疑似」不是「垃圾」）：
+  C:\Users\ksl\AppData\Roaming\Tencent\xwechat            983.1 MB  ← 误报！见说明
+  C:\Users\ksl\AppData\Local\OpenAI\Codex                  659.2 MB
+  C:\Program Files (x86)\Google\GoogleUpdater\crx_cache    518.6 MB
+  C:\Users\ksl\AppData\Local\Claude-3p\claude-code         504.2 MB
+  C:\Users\ksl\AppData\Local\@deepseek-aidsh-desktop-updater\pending  276.3 MB
+  说明：xwechat 是微信的数据目录，微信其实装着（C:\微信本体 也在），
+  但它的卸载列表条目是中文名「微信」，与英文目录 xwechat 比对不上 → 误报。
+  这正好说明为什么软件只标「疑似」：删不删永远要你人工确认。
+
+无法访问的 760 处（重点几类）：
+  - C:\Windows.old\Users\...（旧系统迁移目录，内容被权限挡住，实际大小比显示的大）
+  - C:\System Volume Information（系统还原点，要管理员）
+  - 各盘的 $RECYCLE.BIN（回收站，按账户隔离）
+  - C:\ProgramData\Microsoft\Windows\WER、D:\WindowsApps 等
+  → 这意味着 265.1 GB 是被低估的：真实磁盘占用更大。
+    要算全必须提权扫描：双击「扫描C和D盘(提权).bat」，点 UAC「是」。
+
+
+======================================================================
+六、踩过的坑（全部真实发生，按时间顺序）
+======================================================================
+
+坑 1（致命，只有全盘扫描才暴露）：
+  扫描器第一版全盘跑到第一个无权限目录就崩：
+  UnboundLocalError: cannot access local variable 'ex'
+  原因：代码里 except OSError as ex 和排除目录列表变量 ex 重名。
+  Python 在 except 块结束后会把 ex 这个名字删掉，下一轮循环读排除列表就扑空。
+  小目录测试全绿（没触发过任何 OSError）所以没测出来。
+  修复：except 绑定名改为 oserr。教训：except 的变量名不能和函数内其他变量重名；
+  权限类代码路径必须用「会触发异常的夹具」测。
+
+坑 2（路径拼接）：
+  全盘扫描出来的路径是 C:Windows\... 而不是 C:\Windows\...（盘符根后的反斜杠丢了）。
+  原因：C:\ 这种带尾反斜杠的根 + 后缀拼接时把分隔符吞了；测试用的 _fixture 不是盘符根，
+  测不出。后果：路径结构错乱、残留识别 0 命中、抽样复核 12/15 全错。
+  修复：根统一去尾反斜杠，拼接时显式判断后缀首字符；目录和文件两处拼接都改；
+  增加了「盘符根 + 尾反斜杠」的回归测试（scan "C:/" 快速复现）。
+
+坑 3（--onefile 启动即崩）：
+  单文件版 exe 启动报 [PYI-ERROR] Could not create temporary directory!
+  本机 Temp 目录（C:\Users\ksl\AppData\Local\Temp）有权限问题——连无沙箱运行
+  （显式指定真实 Temp）也建不了目录。先误以为是沙箱拦截，无沙箱复跑仍失败才定案。
+  修复：改用 --onedir 文件夹版（启动不解压临时目录）。工程结论：本机打包一律用
+  onedir，不用 onefile。注意：这个 Temp 问题没修，会影响所有单文件 exe /
+  自解压安装器，之后你想修再说。
+
+坑 4（pip 环境）：
+  沙箱里 pip 装不了 PyInstaller：一没网络（直连和走本机代理都出不去），
+  二写不进 AppData。解决：用 DSH 自带 node 从 PyPI 下载 wheel，
+  手动解压到工程内 pylibs/，再用 PYTHONPATH 跑 PyInstaller。
+
+坑 5（窗口版启动即崩，你截图发现的就是这个）：
+  双击 exe 弹 Unhandled exception in script:
+  'NoneType' object has no attribute 'reconfigure'（gui.py line 441 in main）
+  原因：--windowed 打包没有控制台，sys.stdout 是 None，入口那句
+  sys.stdout.reconfigure(...) 一执行就崩；控制台版自检 100% 通过，测不到这条路径。
+  修复：try/except (AttributeError, ValueError) 包住 reconfigure；
+  重新打包并整目录替换桌面版本。教训：窗口版入口对 stdout/stderr 的任何操作都要判空，
+  「控制台版自检通过」不能当作「窗口版可用」的证据。
+
+坑 6（桌面文件被锁）：
+  替换桌面 exe 时复制失败：libtommath.dll / python314.dll 等被占用。
+  原因：旧的崩溃进程还挂着（报错框没关），锁着 _internal 里的 DLL。
+  修复：结束残留进程后，整个「磁盘分析」文件夹删掉重拷（第一次是半新半旧，有风险）。
+
+坑 7（终端输入层的坑，记录在案）：
+  - bash 把 taskkill /IM 的 /IM 转成了路径 C:/.../IM，命令直接失效；
+  - 内联 python -c 里的 \" 被 bash 吞掉，整条命令解析错乱。
+  教训：长命令写成脚本文件；Windows 原生命令尽量用单行 PowerShell。
+
+另有几个小坑：
+  - 视图代码里把字符串列表按元组解包（ValueError: too many values to unpack），
+    已修；
+  - GUI 隐藏文件排序用 int() 解 human() 的 "2.0 KB" 会崩，已改为按原始字节排序；
+  - unittest 用的小夹具目录挂在工程里（_fixture），测试后已清理。
+
+
+======================================================================
+七、验证记录
+======================================================================
+
+- 扫描器精确性：verify-scan.py 独立遍历逐字节比对，计数与大小完全一致
+- 全盘抽样复核：verify-sample.py 随机抽 15 个目录重走，15/15 全一致
+- 隐藏文件/ADS 夹具：造了带隐藏属性与 ADS 的测试目录，hidden/ads 视图输出正确
+- GUI 自检：--selftest 五视图行数正常（hidden 524 / residual 1000 / big 500 / old 500）
+- 打包 exe 自检：打包版跑 --selftest 通过（修复窗口版问题后用控制台版验证同一份代码）
+- 记忆库自检：check-vault.mjs 四节全绿，0 问题
+
+
+======================================================================
+八、怎么用
+======================================================================
+
+日常使用：
+  双击桌面「磁盘分析\磁盘分析.exe」——自动读取最新一次扫描的数据库。
+  五个标签页按需看；任何列表右键可以打开所在文件夹、复制路径、移入隔离区。
+
+重新扫描（数据会过期，建议隔一段时间重扫）：
+  双击工程里的「扫描C和D盘.bat」——普通权限扫描，约 1 分钟
+  或双击「扫描C和D盘(提权).bat」——点 UAC「是」，能看 Windows.old、
+  系统还原点、回收站等普通权限进不去的地方，约 1-2 分钟
+
+隔离区（替代直接删除）：
+  右键「移入隔离区」后，文件被移动到：
+    C 盘条目 → 工程目录\quarantine\c\
+    D 盘条目 → D:\磁盘隔离区\
+  同盘移动是瞬间完成的（改名），跨盘会复制（慢）。
+  manifest.json 记录每个条目的原始路径，可还原（目前还原需要我帮你写命令，
+  界面里还没做还原按钮）。
+
+命令行用法（可选）：
+  python scan.py C:\ D:\ --exclude data        全盘扫描
+  python views.py tree    data\scan-xxx.sqlite 占比树
+  python views.py hidden  data\scan-xxx.sqlite 隐藏文件专项
+  python views.py ads     C:\Users\ksl         ADS 检测
+  python residual.py      data\scan-xxx.sqlite 疑似残留
+  python verify-sample.py data\scan-xxx.sqlite 30   抽样复核
+
+
+======================================================================
+九、已知限制与待办
+======================================================================
+
+1. 本机 Temp 目录权限异常未修（影响所有单文件 exe / 自解压安装器）
+2. 提权扫描还没跑（Windows.old、系统还原点、回收站的实际占用没算进来）
+3. ADS 检测目前只有命令行版，没接进图形界面
+4. 残留识别有误报：卸载列表是中文名的软件（如微信）对不上英文目录
+5. 每次扫描都是全盘重扫，没有增量（数据不大时无所谓，45 秒左右）
+6. exe 未签名：首次双击可能弹 SmartScreen，点「更多信息」→「仍要运行」
+7. 隔离区还原只有命令行，界面后续可以加
+8. 改动代码后需要重新打包（打包流程见 README.md）
+
+
+======================================================================
+十、文件清单（工程目录）
+======================================================================
+
+scan.py                全盘扫描器（v0.1）
+analyze.py             目录聚合（目录总大小 / 区域分类）
+views.py               视图：tree / hidden / ads（v0.2）
+residual.py            疑似残留识别（v0.3）
+gui.py                 Tkinter 图形界面（v0.4）
+quarantine.py          隔离区（可回滚移动）
+verify-scan.py         扫描结果全量复核
+verify-sample.py       扫描结果抽样复核
+README.md              工程说明与打包流程
+扫描C和D盘.bat          普通权限全盘扫描
+扫描C和D盘(提权).bat     提权全盘扫描
+打开图形界面.bat         用 Python 直接开界面（等价于双击 exe）
+
+data\scan-20261018-015120.sqlite    本次全盘扫描数据库（424,983 文件）
+data\scan-20261018-015120-report.txt 扫描汇总报告
+data\hidden-report.txt               隐藏文件专项报告
+data\residual-report.txt             疑似残留报告
+wheels\   pylibs\                    打包用的 PyInstaller 组件
+tools\    fetch-wheels.mjs / unpack-wheels.py   打包辅助脚本
+tests\    check-report.py / make-fixture.py     测试与核对脚本
+
+
+======================================================================
+十一、版本记录
+======================================================================
+
+2026-10-18  v0.1  扫描器：全盘扫描 + SQLite + 中文报告，抽样复核 15/15
+2026-10-18  v0.2  视图：占比树 / 隐藏文件专项 / ADS 检测，夹具验证通过
+2026-10-18  v0.3  疑似残留识别：1,687 个疑似目录
+2026-10-18  v0.4  Tkinter 五标签页 + treemap + 隔离区，自检通过
+2026-10-18  v0.5  exe 打包上桌面（onedir 文件夹版）
+2026-10-18  修复  窗口版启动崩溃（stdout 判空）→ 重新打包替换
+
+======================================================================
+全文完。工程目录和桌面成品都还在，原文件没有动过任何东西。
+======================================================================
