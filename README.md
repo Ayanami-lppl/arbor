@@ -1,122 +1,139 @@
-# Arbor（磁盘分析工具）
+<div align="center">
 
-只读的 Windows 磁盘分析工具，用于：
-1. 看每个文件夹、每种文件类型占多少空间（占比）
-2. 把隐藏文件单独拎出来看（含 NTFS 备用数据流 ADS）
-3. 找出"已卸载软件的残留目录"（疑似，不自动删）
+# Arbor
 
-## 原则
+**只读的 Windows 磁盘空间分析工具：看清每一块空间从哪来**
 
-- 扫描与所有视图**全程只读**，绝不修改、移动、删除任何文件
-- 残留识别只标「疑似」，删不删永远手动决定
-- 结果存 SQLite 数据库，重复扫描只做一次全盘
+![Arbor](icons/arbor-512.png)
 
-## 隔离区
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D6?style=flat-square)
+![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-3DA639?style=flat-square)
+![Dependencies](https://img.shields.io/badge/dependency-无第三方包-4B8BBE?style=flat-square)
+![Read-only](https://img.shields.io/badge/scan-只读-287D78?style=flat-square)
 
-- C 盘条目：`%LOCALAPPDATA%\disk-inspector\quarantine\c`（不依赖工程目录）
-- D 盘条目：`D:\磁盘隔离区`
-- `manifest.json` 先记 pending 再移动、成功后才标 ok，进程中途被杀也不会丢记录
-- 还原入口暂未做进界面，可用 `quarantine.Quarantine().restore(base, index)` 回滚
+</div>
+
+---
+
+## 这是什么
+
+Arbor 把一块硬盘的空间摊开给你看：目录树、占比长条图、隐藏文件、疑似残留，一屏看完。
+
+它只读——扫描和查看全程不修改、不移动、不删除任何文件。要清理，只能由你把条目「移入隔离区」，而隔离区是可随时还原的移动，不是删除。
+
+## 能做什么
+
+| 能力 | 说明 |
+|---|---|
+| 目录树 | 真实父子结构，同级按大小降序；展开才加载；大小 / 占父级 / 占扫描根 / 项目数 / 状态 |
+| 长条占比图 | 条长按当前范围最大项归一，颜色越深越大；点条下钻，右键返回 |
+| 隐藏文件 | 单独一页：隐藏 / 系统属性、隐藏目录、NTFS 备用数据流（ADS）按需检测 |
+| 疑似残留 | 比对注册表卸载列表，列出对不上安装记录的目录，带置信度，只标「疑似」 |
+| 大文件 / 很久没动 | 按大小、按修改时间筛选 |
+| 隔离区 | 移动而非删除；清单先记 pending 再移动；界面可一键还原 |
+| 防误删 | 系统与重要目录禁止移入；可疑目录二次确认；普通位置确认 |
+| 帮助 | 「数据怎么读」一页讲清每个字段和百分比的分母 |
+
+## 安全边界
+
+- 扫描与视图全程只读，绝不自动删除
+- 疑似残留＝对不上安装记录，不等于垃圾；便携 / 绿色软件会被误标
+- 移入隔离区＝可回滚的移动，同盘瞬间完成
+- 禁止移入：盘符根、用户主目录、桌面 / 文档 / 下载 / 图片 / 音乐 / 视频、Windows、Program Files、微软组件、系统还原点、回收站、程序自身目录
+- 无需管理员权限；`Windows.old`、系统还原点这类目录要提权扫描才看得到
+
+## 快速开始
+
+**方式 A：下载现成程序**（不需要 Python）
+
+到 [Releases](https://github.com/Ayanami-lppl/arbor/releases) 下载 `Arbor-windows-x64.zip`，解压后双击 `Arbor.exe`。
+
+**方式 B：从源码运行**
+
+```bash
+git clone https://github.com/Ayanami-lppl/arbor.git
+cd arbor
+python scan.py C:\ D:\ --exclude data   # 第一次：全盘扫描
+python gui.py                          # 打开界面（自动读取最新扫描库）
+```
+
+Python 3.10+，Tkinter 随 Python 自带，无第三方依赖。
+
+## 扫描
+
+```bash
+python scan.py C:\ D:\ --exclude data        # 全盘扫描 → data/scan-*.sqlite
+python scan.py --db data/custom.sqlite D:\   # 只扫某个盘 / 指定库
+```
+
+也可以双击 `扫描C和D盘.bat`（普通）或 `扫描C和D盘(提权).bat`（提权，能看到 `Windows.old` 等目录）。
+
+本机实测：约 42 万个文件 / 265 GB / 45 秒；随机抽样复核 15/15 一致。
+
+## 命令行视图（可选）
+
+```bash
+python views.py tree   data/scan-xxx.sqlite   # 占比树
+python views.py hidden data/scan-xxx.sqlite   # 隐藏文件专项
+python views.py ads    C:\Users               # ADS 检测
+python residual.py     data/scan-xxx.sqlite   # 疑似残留
+```
+
+## 打包 exe
+
+```bash
+node tools/fetch-wheels.mjs     # 用 DSH 自带的 node 从 PyPI 拉 PyInstaller wheel
+python tools/unpack-wheels.py   # 解包到 pylibs/
+PYTHONPATH=pylibs python -m PyInstaller --onedir --windowed \
+  --icon icons/arbor.ico --name Arbor gui.py
+```
+
+不要用 `--onefile`：单文件版启动时要解压到系统临时目录，临时目录受限的机器上会直接失败。
 
 ## 文件
 
 | 文件 | 作用 |
 |---|---|
-| `scan.py` | v0.6 全盘扫描器：扫 C/D 盘 → SQLite + 中文汇总报告（junction / 符号链接一律跳过） |
-| `analyze.py` | 目录聚合（谁包含谁、总大小） |
-| `views.py` | v0.2 视图：`tree` 占比树 / `hidden` 隐藏文件专项 / `ads` ADS 检测 |
-| `residual.py` | v0.6 疑似残留识别（分级匹配 + 按软件去重 + 置信度） |
-| `gui.py` | v0.4 Tkinter 图形界面（treemap + 五标签页 + 隔离区） |
-| `quarantine.py` | 隔离区（可回滚的移动） |
+| `scan.py` | 扫描器 → SQLite + 中文汇总报告（junction / 符号链接不跟随） |
+| `analyze.py` | 目录聚合（谁包含谁、总大小、直属文件索引） |
+| `views.py` | 命令行视图：tree / hidden / ads |
+| `residual.py` | 疑似残留识别（注册表匹配 + 按软件去重 + 置信度） |
+| `gui.py` | Tkinter 界面：目录树、长条图、列表、隔离区、帮助 |
+| `quarantine.py` | 隔离区（可回滚移动 + 清单） |
 | `verify-scan.py` / `verify-sample.py` | 扫描结果复核（全量 / 抽样） |
-| `扫描C和D盘.bat` | 双击运行全盘扫描（输出到 `data\`） |
-| `扫描C和D盘(提权).bat` | 提权扫描（能看到 Windows.old、系统还原点等普通权限进不去的目录） |
-| `打开图形界面.bat` | 双击打开图形界面（自动读取最新扫描库） |
-| `tools/fetch-wheels.mjs` / `tools/unpack-wheels.py` | 打包 exe 时下载/解包 PyInstaller（需要重新打包时用） |
+| `tests/` | 四套回归测试 |
+| `icons/` | 图标（多尺寸 `.ico` + 生成脚本） |
 
-## 打包成 exe（已产出桌面版）
+## 测试
 
-- 桌面 `Arbor\Arbor.exe`（文件夹版，无需安装、双击即用；图标 icons/arbor.ico）
-- 重新打包：`tools/fetch-wheels.mjs` 拉 wheel → `tools/unpack-wheels.py` 解包 → `PYTHONPATH=pylibs python -m PyInstaller --onedir --windowed --icon icons/arbor.ico --name Arbor gui.py`
-- 注意：**不要用 `--onefile`**——本机 `%TEMP%` 目录有权限问题，单文件版启动时解压会失败
-
-## 用法
-
-```
-python scan.py C:\ D:\ --exclude data              # 全盘扫描
-python views.py tree    data\scan-xxx.sqlite       # 占比树
-python views.py hidden  data\scan-xxx.sqlite       # 隐藏文件专项
-python views.py ads     C:\Users\ksl               # ADS 检测
-python residual.py      data\scan-xxx.sqlite       # 疑似残留
-python verify-sample.py data\scan-xxx.sqlite 30    # 抽样复核
+```bash
+python tests/test_tree.py        # 目录树 15 项
+python tests/test_misc.py        # 排序 / 徽标 / 搜索 / ADS / 防误删
+python tests/test_phase4.py      # 启动页、坏库、加载中关闭
+python tests/test_quarantine.py  # 隔离区移动与还原
+python gui.py --selftest         # 全视图自检
 ```
 
-## 版本计划
+## 已知限制
 
-- v0.1 扫描器（完成）
-- v0.2 视图：tree / hidden / ads（完成）
-- v0.3 残留识别（完成，待全盘数据验证）
-- v0.4 Tkinter 图形界面 + 隔离区
-- v0.5 打包 exe 放桌面
-- v0.6 修复 junction 重复计数；隔离区崩溃安全 + 固定位置；残留按软件去重并加置信度
-- v0.7 启动与加载重构（阶段一，完成）：启动页先绘制再后台加载；只读打开旧库；聚合只做一次供残留复用；非首页按需加载；单实例；切库任务隔离
-- v0.8 真实目录树 + 详情区（阶段二，完成）：名称列真实目录树（懒加载）；大小/占父级/占扫描根/项目数/状态；直属文件容器；搜索定位；详情区含分母口径与软件归属
-- v0.9 视觉统一 + 联动空间图（阶段三，完成）：左侧导航；浅色工作台样式；目录树页底部二分矩形树图（与选择联动、可折叠、可下钻）；详情区可折叠
-- v1.0 品牌启动动效 + 打包回归（阶段四，完成）：「空间长出枝脉」启动动画；坏库/加载中关闭/隔离区还原回归；--no-anim
-- v1.1 收尾打磨（完成）：列点击排序、隐藏/系统徽标、文件名搜索、ADS 接入界面、悬停态、DPI 感知
-- v1.2 新手帮助 + 防误删 + 居中（完成）：「数据怎么读」帮助窗口（菜单和工具栏 ? 都能开）；隔离区三级防护（系统/重要目录禁止、可疑目录二次确认、正常确认）；窗口与启动页居中并按系统 DPI 等比缩放
+- 大小按逻辑大小统计；实际磁盘占用受簇大小、无权访问目录影响
+- `Windows.old`、系统还原点等目录普通权限读不到，需要提权扫描
+- 疑似残留会误标便携软件；中文名软件（如微信）对不上英文目录名
+- 只在 Windows 10 / 11 实测，其他平台未测
 
-## v1.1 收尾项细节（2026-10-18）
+## 版本
 
-- 列点击排序：名称 / 大小 / 项目数（占父级、占扫描根按大小排），再点同一列切换升降序，表头显示 ↓/↑；只重排已加载的兄弟节点，不丢展开状态
-- 隐藏/系统徽标：状态列显示「隐藏 / 系统 / 读不全」，详情区属性行同步；数据取自扫描库的 hidden/system 字段
-- 文件名搜索：搜索框现在同时搜目录和文件（按文件名子串），结果窗口带类型列，双击定位（文件会展开所属文件容器）
-- ADS 检测接入界面：详情区「ADS 检测」按钮——选中文件直接扫，选中目录扫子树（限 2000 个文件并标注未扫完）；结果窗口列出 文件/数据流/大小，耗时写日志
-- 悬停态：目录树行悬停浅色高亮；空间图悬停时底部显示完整路径与大小
-- DPI 感知：启动时 SetProcessDpiAwareness(1)，系统缩放时按比例渲染而不是位图拉伸（实际观感需人工确认）
-- 回归：`tests/test_misc.py` 8 项（隐藏/系统徽标、名称/大小排序、目录+文件搜索、ADS、子树收集）全过；tree/phase4/quarantine 三套仍全过；selftest/smoke 正常
+| 版本 | 内容 |
+|---|---|
+| v1.2 | 帮助窗口、防误删三级防护、窗口居中 + DPI 缩放 |
+| v1.0 | 启动动效「空间长出枝脉」、打包回归 |
+| v0.9 | 左侧导航、浅色主题、联动长条图 |
+| v0.8 | 真实目录树 + 详情区 |
+| v0.7 | 启动重构（后台加载、只读库、单实例） |
+| v0.6 | junction 修复、隔离区加固、残留去重 |
+| v0.1–v0.5 | 扫描器 → 视图 → 残留识别 → 界面 → exe |
 
-## v1.0 阶段四细节（2026-10-18）
+## License
 
-- 启动页改为 Canvas 动效：细线从中心分叉到 6 个节点，再长出空间块（12 帧 × 60ms，约 0.8 秒）；由真实加载状态驱动，首页就绪立即结束，不播完不留等待
-- 减少动效：读 Windows「在 Windows 中显示动画」设置（SPI_GETCLIENTAREAANIMATION），关闭时只画静态完整帧；`--no-anim` 强制静态
-- 关闭启动页 = 取消启动（后台线程 daemon，不阻塞退出；已保存的数据不受影响）
-- 回归测试 `tests/test_phase4.py`：缺失数据库失败退出、损坏数据库失败退出、加载中关闭无异常、动效有绘制内容、`--no-anim` 仍可加载
-- 隔离区回归 `tests/test_quarantine.py`：移动 → 清单记录 → 还原 → 清单清空；还原拒绝覆盖原位置已存在的同名文件（`FileExistsError`），实测 8 项全过
-- 打包回归：console exe 自检 + windowed exe 无窗口冒烟（退出码 0）；连续启动的单实例由互斥体测试覆盖
-- 未验证：真实窗口动效观感、最小化后唤醒、100/125/150% DPI 与小屏幕布局、键盘操作（需人工看）
-
-## v0.9 阶段三细节（2026-10-18）
-
-- 左侧导航替代页签栏（目录树/占比/隐藏文件/疑似残留/大文件/很久没动/隔离区），选中项高亮
-- 浅色工作台样式：背景 #F5F6F8、内容面白色、正文 #20252B、辅助 #69727D、强调 #287D78、行高 30
-- 目录树页底部新增「联动空间图」：**横向长条图**（条长按最大项归一，颜色从深到浅随排名递增，右侧显示大小与占范围百分比），上限 40 项 + 「其余 N 项」；「占比」页也改为同样的长条样式
-- 联动：选中目录 → 图表范围切到该目录；点击长条 → 定位/下钻到该节点（目录进目录，文件进其父目录并选中）；右键 → 返回上一级
-- 折叠：工具栏「空间图 ▾ / 详情 ▸」两个开关，图表和详情区可各自收起
-- 长条颜色：普通项按大小深浅渐变（深=大）、隐藏目录红、疑似残留橙、文件灰蓝、其余项灰；选中项描边
-- 测试：图表面积守恒、无重叠、下钻/返回/文件定位的联动逻辑（脚本实测），tree 测试 15 项仍全过
-- 未验证：真实窗口下的视觉细节（字体/留白/悬停态）、100/125/150% DPI 与小屏幕布局、键盘操作，需人工看
-
-## v0.8 阶段二细节（2026-10-18）
-
-- 新页签「目录树」为默认首页：Treeview 名称列是真实父子结构，按真实大小降序；懒加载（展开才查子项，每批 200 条异步插入）
-- 列口径：大小=含子项总计；占父级=选定目录直属父目录总大小为分母；占扫描根=所属扫描根总大小为分母；详情区写明分母
-- 直属文件不是虚节点：`[此目录下的文件]` 容器可展开到每个文件（按大小排序），文件行显示 大小/占父级/占扫描根/状态
-- 文件索引：`load_snapshot(con, with_files=True)` 同一次遍历额外建「目录→直属文件」索引，GUI 展开文件容器 ~1ms（此前扫子树 2.9s）
-- 详情区：类型/完整路径/直接父目录/大小（含子项）/直属大小/占父级/占扫描根/项目数/属性/读取状态/软件归属 + 打开位置、复制路径、隔离
-- 搜索：全扫描集目录名搜索（含命中数与截断提示），双击结果定位到目录树（自动展开祖先、文件自动展开所属文件容器）
-- 读取不完整：扫描时无权限的目录在状态列标「读不全」，详情区说明子目录无权限
-- 测试：`tests/test_tree.py` 15 项断言（空目录、同名文件、中文长路径、父子求和、重复展开幂等、定位深文件）全部通过
-- 未完成：列点击排序、隐藏/系统属性徽标、软件归属视图（属阶段三/四）；文件名搜索（当前只搜目录名）
-
-## v0.7 阶段一细节（2026-10-18）
-
-- 运行：`python gui.py`（自动取最新扫描库）｜ `python gui.py --selftest`（同步管线自检）｜ `python gui.py --smoke`（真实异步管线冒烟）
-- 日志与打点：`data/logs/gui.log`，含 `splash_first_frame / db_open / aggregate / residual / load_total / ready`
-- 只读打开：`mode=ro`，不再 `CREATE INDEX`；旧库不会被修改（实测 mtime 不变）
-- 共享聚合：`analyze.load_snapshot(con)` 一次生成 totals/direct/children/roots/dirs，`residual.analyze(db, totals=..., dirs=...)` 复用，不再二次遍历
-- 单实例：命名互斥体 `Local\panzhi_disk_analyzer_v1`；第二次启动只唤醒已有窗口（找不到窗口时静默退出）
-- 加载失败/无库：进入可操作的空状态，不弹假数据
-- 桌面成品：`C:\Users\ksl\Desktop\Arbor\Arbor.exe`（onedir 文件夹版，含 arbor.ico 窗口图标；旧 `磁盘分析` 保留不动）
-- 未验证项（如实记录）：真实双击的视觉状态、最小化唤醒、1366×768 与 100/125/150% DPI 下的布局、窗口版 exe 的 `--smoke` 输出（GUI 子系统的 stdout 被接管，报告未落盘）
-- 界面结构、treemap、树表、动效等属后续阶段（第二至四阶段），本轮未改视觉
+MIT
